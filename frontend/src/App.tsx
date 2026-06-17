@@ -1,6 +1,10 @@
-import { useState, useRef, useEffect } from "react";
+/* eslint-disable react-hooks/preserve-manual-memoization, react-hooks/set-state-in-effect */
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import { PDFDocument, rgb } from "pdf-lib";
+import { useAuth } from "./context/AuthContext";
+import { api } from "./lib/api";
+import AuthPage from "./pages/AuthPage";
 
 import {
   FileText,
@@ -18,6 +22,10 @@ import {
   Calendar,
   ChevronRight,
   Info,
+  LogOut,
+  Clipboard,
+  RefreshCw,
+  Activity,
 } from "lucide-react";
 
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -178,14 +186,156 @@ const DrawingPad = ({ onSave, color }: DrawingPadProps) => {
   );
 };
 
+interface RecipientRow {
+  _id: string;
+  name: string;
+  email: string;
+  role: string;
+  status: string;
+  signToken?: string;
+}
+
+interface DocumentRow {
+  _id: string;
+  originalName: string;
+  status: string;
+  createdAt: string;
+  fileSize: number;
+}
+
+interface AuditLogRow {
+  action: string;
+  details: string;
+  createdAt: string;
+  user?: { name: string };
+}
+
+const clientBaseUrl = window.location.origin;
+
+function PublicSigningPage() {
+  const token = window.location.pathname.split("/sign/")[1] || "";
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [reason, setReason] = useState("");
+  const [data, setData] = useState<{
+    recipient: { name: string; email: string; role: string; status: string; rejectionReason?: string };
+    document: { id: string; originalName: string; status: string };
+  } | null>(null);
+
+  useEffect(() => {
+    api
+      .getPublicSigningLink(token)
+      .then(setData)
+      .catch((err) => setError(err.message || "Signing link is invalid."))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  const submitStatus = async (status: "Signed" | "Rejected") => {
+    setSubmitting(true);
+    setError("");
+    try {
+      await api.submitPublicSigningStatus(token, {
+        status,
+        rejectionReason: status === "Rejected" ? reason : undefined,
+      });
+      const refreshed = await api.getPublicSigningLink(token);
+      setData(refreshed);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to submit response.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen grid place-items-center bg-slate-50 text-slate-600">
+        Loading signing request...
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="min-h-screen grid place-items-center bg-slate-50 p-6">
+        <div className="max-w-md bg-white border border-slate-200 rounded-xl p-6 shadow-sm text-center">
+          <h1 className="text-xl font-bold text-slate-900 mb-2">Signing Link Unavailable</h1>
+          <p className="text-sm text-slate-500">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+      <div className="w-full max-w-lg bg-white border border-slate-200 rounded-xl shadow-sm p-6 space-y-5">
+        <div>
+          <p className="text-xs uppercase tracking-wider font-semibold text-blue-600">SignFlow Request</p>
+          <h1 className="text-2xl font-bold text-slate-900 mt-1">{data?.document.originalName}</h1>
+          <p className="text-sm text-slate-500 mt-2">
+            {data?.recipient.name} ({data?.recipient.email}) has been invited as {data?.recipient.role}.
+          </p>
+        </div>
+
+        <div className="rounded-lg bg-slate-50 border border-slate-200 p-4">
+          <p className="text-xs font-semibold uppercase text-slate-400">Current Status</p>
+          <p className="text-lg font-bold text-slate-800">{data?.recipient.status}</p>
+          {data?.recipient.rejectionReason && (
+            <p className="text-sm text-slate-500 mt-1">{data.recipient.rejectionReason}</p>
+          )}
+        </div>
+
+        {data?.recipient.status === "Pending" ? (
+          <div className="space-y-3">
+            <textarea
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Reason if rejecting"
+              className="w-full min-h-24 border border-slate-200 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+            />
+            <div className="flex gap-3">
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => submitStatus("Rejected")}
+                className="flex-1 py-2.5 rounded-lg border border-red-200 text-red-600 font-semibold text-sm hover:bg-red-50 disabled:opacity-60"
+              >
+                Reject
+              </button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => submitStatus("Signed")}
+                className="flex-1 py-2.5 rounded-lg bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 disabled:opacity-60"
+              >
+                Accept & Sign
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">Your response has already been recorded.</p>
+        )}
+
+        {error && <p className="text-sm text-red-600">{error}</p>}
+      </div>
+    </div>
+  );
+}
+
 // --- Main App Component ---
 function App() {
+  const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<"documents" | "signatures" | "recipients" | "settings">("documents");
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Document states
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfFileName, setPdfFileName] = useState("No Document");
+  const [currentDocumentId, setCurrentDocumentId] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<DocumentRow[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogRow[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
   const [numPages, setNumPages] = useState(0);
   const [zoom, setZoom] = useState(1.0);
 
@@ -209,65 +359,240 @@ function App() {
   const [dateSize, setDateSize] = useState({ width: 220, height: 60 });
 
   // Recipients State
-  const [recipients, setRecipients] = useState([
-    { id: 1, name: "Manoj KC", email: "manoj@example.com", role: "Signer", status: "Signed" },
-    { id: 2, name: "John Doe", email: "john@example.com", role: "Approver", status: "Pending" },
-  ]);
+  const [recipients, setRecipients] = useState<RecipientRow[]>([]);
   const [newRecipientName, setNewRecipientName] = useState("");
   const [newRecipientEmail, setNewRecipientEmail] = useState("");
   const [newRecipientRole, setNewRecipientRole] = useState("Signer");
+  const [lastSignLink, setLastSignLink] = useState("");
 
-  // Load Saved Draft on initial mount
-  useEffect(() => {
-    const savedDraft = localStorage.getItem("signflow_draft");
-    if (savedDraft) {
-      try {
-        const parsed = JSON.parse(savedDraft);
-        setSignatureText(parsed.signatureText || "Manoj KC");
-        setFontFamily(parsed.fontFamily || "'Great Vibes', cursive");
-        setFontSize(parsed.fontSize || 48);
-        setColor(parsed.color || "#000000");
-        setShowSignature(parsed.showSignature || false);
-        setShowDate(parsed.showDate || false);
-        setDateText(parsed.dateText || new Date().toLocaleDateString());
-        setPosition(parsed.position || { x: 200, y: 200 });
-        setSize(parsed.size || { width: 300, height: 100 });
-        setDatePosition(parsed.datePosition || { x: 200, y: 350 });
-        setDateSize(parsed.dateSize || { width: 220, height: 60 });
-        setSignatureType(parsed.signatureType || "text");
-        setDrawnSignatureUrl(parsed.drawnSignatureUrl || null);
-        showToast("Restored last saved draft.");
-      } catch (e) {
-        console.error("Error loading draft", e);
-      }
-    }
-  }, []);
-
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage(null);
     }, 3000);
+  }, []);
+
+  const loadDraft = useCallback(async () => {
+    try {
+      const parsed = await api.getDraft();
+      if (!parsed || Object.keys(parsed).length === 0) return;
+
+      setSignatureText((parsed.signatureText as string) || user?.name || "Signer");
+      setFontFamily((parsed.fontFamily as string) || "'Great Vibes', cursive");
+      setFontSize((parsed.fontSize as number) || 48);
+      setColor((parsed.color as string) || "#000000");
+      setShowSignature(Boolean(parsed.showSignature));
+      setShowDate(Boolean(parsed.showDate));
+      setDateText((parsed.dateText as string) || new Date().toLocaleDateString());
+      setPosition((parsed.position as { x: number; y: number }) || { x: 200, y: 200 });
+      setSize((parsed.size as { width: number; height: number }) || { width: 300, height: 100 });
+      setDatePosition((parsed.datePosition as { x: number; y: number }) || { x: 200, y: 350 });
+      setDateSize((parsed.dateSize as { width: number; height: number }) || { width: 220, height: 60 });
+      setSignatureType((parsed.signatureType as "text" | "drawn") || "text");
+      setDrawnSignatureUrl((parsed.drawnSignatureUrl as string) || null);
+      if (parsed.zoom) setZoom(parsed.zoom as number);
+      showToast("Restored your saved draft from the database.");
+    } catch (e) {
+      console.error("Error loading draft", e);
+    }
+  }, [showToast, user?.name]);
+
+  const loadRecipients = useCallback(async (documentId: string) => {
+    try {
+      const rows = await api.getRecipients(documentId);
+      setRecipients(rows);
+    } catch (e) {
+      console.error("Error loading recipients", e);
+    }
+  }, []);
+
+  const loadDocuments = useCallback(async () => {
+    setDocumentsLoading(true);
+    try {
+      const rows = await api.listDocuments();
+      setDocuments(rows);
+    } catch (e) {
+      console.error("Error loading documents", e);
+      showToast("Could not load your document dashboard.");
+    } finally {
+      setDocumentsLoading(false);
+    }
+  }, [showToast]);
+
+  const loadAuditTrail = useCallback(async (documentId: string) => {
+    try {
+      const rows = await api.getAuditTrail(documentId);
+      setAuditLogs(rows);
+    } catch (e) {
+      console.error("Error loading audit trail", e);
+      setAuditLogs([]);
+    }
+  }, []);
+
+  const openDocumentFromDashboard = async (doc: DocumentRow) => {
+    try {
+      showToast("Opening saved document...");
+      const blob = await api.getDocumentFile(doc._id);
+      const file = new File([blob], doc.originalName, { type: "application/pdf" });
+      setPdfFile(file);
+      setPdfFileName(doc.originalName);
+      setCurrentDocumentId(doc._id);
+      setNumPages(0);
+
+      const savedSignatures = await api.getSignatures(doc._id);
+      const signature = savedSignatures.find((sig) => sig.field === "signature");
+      const date = savedSignatures.find((sig) => sig.field === "date");
+
+      if (signature) {
+        setShowSignature(true);
+        setSignatureType((signature.signatureType as "text" | "drawn") || "text");
+        setSignatureText((signature.signatureText as string) || user?.name || "Signer");
+        setDrawnSignatureUrl((signature.drawnSignatureUrl as string) || null);
+        setFontFamily((signature.fontFamily as string) || "'Great Vibes', cursive");
+        setFontSize((signature.fontSize as number) || 48);
+        setColor((signature.color as string) || "#000000");
+        setPosition(signature.coordinates as { x: number; y: number });
+        setSize({
+          width: (signature.coordinates as { width: number }).width,
+          height: (signature.coordinates as { height: number }).height,
+        });
+        if (signature.zoom) setZoom(signature.zoom as number);
+      } else {
+        setShowSignature(false);
+      }
+
+      if (date) {
+        setShowDate(true);
+        setDateText((date.signatureText as string) || new Date().toLocaleDateString());
+        setDatePosition(date.coordinates as { x: number; y: number });
+        setDateSize({
+          width: (date.coordinates as { width: number }).width,
+          height: (date.coordinates as { height: number }).height,
+        });
+      } else {
+        setShowDate(false);
+      }
+
+      await loadAuditTrail(doc._id);
+      showToast("Document loaded from database.");
+    } catch (e) {
+      console.error("Error opening document", e);
+      showToast("Could not open that document.");
+    }
   };
 
-  const handleSaveDraft = () => {
-    const draftData = {
-      signatureText,
-      fontFamily,
-      fontSize,
-      color,
-      showSignature,
-      showDate,
-      dateText,
-      position,
-      size,
-      datePosition,
-      dateSize,
-      signatureType,
-      drawnSignatureUrl,
-    };
-    localStorage.setItem("signflow_draft", JSON.stringify(draftData));
-    showToast("Draft saved successfully to local storage!");
+  useEffect(() => {
+    if (user) {
+      loadDraft();
+      loadDocuments();
+    }
+  }, [user, loadDraft, loadDocuments]);
+
+  useEffect(() => {
+    if (currentDocumentId) {
+      loadRecipients(currentDocumentId);
+      loadAuditTrail(currentDocumentId);
+    } else {
+      setRecipients([]);
+      setAuditLogs([]);
+    }
+  }, [currentDocumentId, loadRecipients, loadAuditTrail]);
+
+  if (window.location.pathname.startsWith("/sign/")) {
+    return <PublicSigningPage />;
+  }
+
+  if (!user) {
+    return <AuthPage />;
+  }
+
+  const userInitials = user.name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+  const handleSaveDraft = async () => {
+    try {
+      await api.saveDraft({
+        signatureText,
+        fontFamily,
+        fontSize,
+        color,
+        showSignature,
+        showDate,
+        dateText,
+        position,
+        size,
+        datePosition,
+        dateSize,
+        signatureType,
+        drawnSignatureUrl,
+        zoom,
+      });
+      showToast("Draft saved to your account!");
+    } catch {
+      showToast("Failed to save draft.");
+    }
+  };
+
+  const handlePdfUpload = async (file: File) => {
+    try {
+      showToast("Uploading PDF to server...");
+      const doc = await api.uploadDocument(file);
+      setCurrentDocumentId(doc.id);
+      setPdfFile(file);
+      setPdfFileName(doc.originalName);
+      await loadDocuments();
+      await loadAuditTrail(doc.id);
+      showToast("Document uploaded and saved!");
+    } catch {
+      showToast("Upload failed. Is the backend running?");
+    }
+  };
+
+  const syncSignaturesToBackend = async () => {
+    if (!currentDocumentId) return;
+
+    if (showSignature) {
+      await api.saveSignature({
+        documentId: currentDocumentId,
+        field: "signature",
+        signatureType,
+        signatureText,
+        drawnSignatureUrl,
+        fontFamily,
+        fontSize,
+        color,
+        page: 1,
+        coordinates: { x: position.x, y: position.y, width: size.width, height: size.height },
+        zoom,
+        signer: user.name,
+        status: "Signed",
+      });
+    }
+
+    if (showDate) {
+      await api.saveSignature({
+        documentId: currentDocumentId,
+        field: "date",
+        signatureType: "text",
+        signatureText: dateText,
+        fontFamily,
+        fontSize: fontSize * 0.8,
+        color,
+        page: 1,
+        coordinates: {
+          x: datePosition.x,
+          y: datePosition.y,
+          width: dateSize.width,
+          height: dateSize.height,
+        },
+        zoom,
+        status: "Signed",
+      });
+    }
   };
 
   // Drag handles for Signature
@@ -285,7 +610,7 @@ function App() {
       const deltaY = moveEvent.clientY - startY;
 
       let newX = initialX + deltaX;
-      let newY = initialY + deltaY;
+      const newY = initialY + deltaY;
 
       newX = Math.max(0, Math.min(850 * zoom - size.width, newX));
       setPosition({ x: newX, y: newY });
@@ -344,7 +669,7 @@ function App() {
       const deltaY = moveEvent.clientY - startY;
 
       let newX = initialX + deltaX;
-      let newY = initialY + deltaY;
+      const newY = initialY + deltaY;
 
       newX = Math.max(0, Math.min(850 * zoom - dateSize.width, newX));
       setDatePosition({ x: newX, y: newY });
@@ -393,6 +718,24 @@ function App() {
 
     try {
       showToast("Generating signed document...");
+
+      if (currentDocumentId) {
+        await syncSignaturesToBackend();
+        const blob = await api.generateSignedPdf(currentDocumentId);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `signed-${pdfFileName}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        await loadDocuments();
+        if (currentDocumentId) await loadAuditTrail(currentDocumentId);
+        showToast("Signed PDF generated on server and downloaded!");
+        return;
+      }
+
       const existingPdfBytes = await pdfFile.arrayBuffer();
       const pdfDoc = await PDFDocument.load(existingPdfBytes);
       const pages = pdfDoc.getPages();
@@ -468,7 +811,11 @@ function App() {
       }
 
       const pdfBytes = await pdfDoc.save();
-      const blob = new Blob([pdfBytes as any], { type: "application/pdf" });
+      const pdfArrayBuffer = pdfBytes.buffer.slice(
+        pdfBytes.byteOffset,
+        pdfBytes.byteOffset + pdfBytes.byteLength
+      ) as ArrayBuffer;
+      const blob = new Blob([pdfArrayBuffer], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement("a");
@@ -486,29 +833,65 @@ function App() {
     }
   };
 
-  const handleAddRecipient = (e: React.FormEvent) => {
+  const handleAddRecipient = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRecipientName || !newRecipientEmail) return;
-    const newRecipient = {
-      id: Date.now(),
-      name: newRecipientName,
-      email: newRecipientEmail,
-      role: newRecipientRole,
-      status: "Pending",
-    };
-    setRecipients([...recipients, newRecipient]);
-    setNewRecipientName("");
-    setNewRecipientEmail("");
-    showToast(`Recipient "${newRecipient.name}" added successfully.`);
+    if (!currentDocumentId) {
+      showToast("Upload a document first before adding recipients.");
+      return;
+    }
+
+    try {
+      const created = await api.addRecipient({
+        documentId: currentDocumentId,
+        name: newRecipientName,
+        email: newRecipientEmail,
+        role: newRecipientRole,
+      });
+      setRecipients([...recipients, created]);
+      setNewRecipientName("");
+      setNewRecipientEmail("");
+      showToast(`Recipient "${created.name}" added successfully.`);
+      await loadDocuments();
+      await loadAuditTrail(currentDocumentId);
+    } catch {
+      showToast("Failed to add recipient.");
+    }
   };
 
-  const handleDeleteRecipient = (id: number) => {
-    setRecipients(recipients.filter((r) => r.id !== id));
-    showToast("Recipient removed.");
+  const handleDeleteRecipient = async (id: string) => {
+    try {
+      await api.deleteRecipient(id);
+      setRecipients(recipients.filter((r) => r._id !== id));
+      if (currentDocumentId) await loadAuditTrail(currentDocumentId);
+      showToast("Recipient removed.");
+    } catch {
+      showToast("Failed to remove recipient.");
+    }
   };
 
-  const handleSendReminder = (name: string) => {
-    showToast(`Signing reminder email sent to ${name}!`);
+  const handleSendReminder = async (id: string, name: string) => {
+    try {
+      const result = await api.sendReminder(id);
+      setLastSignLink(result.signLink);
+      await navigator.clipboard?.writeText(result.signLink);
+      if (currentDocumentId) await loadAuditTrail(currentDocumentId);
+      showToast(`Signing link for ${name} copied.`);
+    } catch {
+      showToast("Failed to send reminder.");
+    }
+  };
+
+  const copyRecipientLink = async (recipient: RecipientRow) => {
+    if (!recipient.signToken) {
+      showToast("No signing token available for this recipient.");
+      return;
+    }
+
+    const link = `${clientBaseUrl}/sign/${recipient.signToken}`;
+    setLastSignLink(link);
+    await navigator.clipboard?.writeText(link);
+    showToast("Public signing link copied.");
   };
 
   return (
@@ -586,16 +969,24 @@ function App() {
           </nav>
         </div>
 
-        <div className="p-4 border-t border-slate-800">
+        <div className="p-4 border-t border-slate-800 space-y-2">
           <div className="flex items-center gap-3 p-2 bg-slate-850 rounded-xl">
             <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center font-bold text-white text-xs">
-              MK
+              {userInitials}
             </div>
-            <div>
-              <p className="text-xs font-semibold text-white">Manoj KC</p>
-              <p className="text-[10px] text-slate-400">Professional Plan</p>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold text-white truncate">{user.name}</p>
+              <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
             </div>
           </div>
+          <button
+            onClick={logout}
+            type="button"
+            className="w-full flex items-center justify-center gap-2 py-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition"
+          >
+            <LogOut size={14} />
+            Sign Out
+          </button>
         </div>
       </div>
 
@@ -678,8 +1069,7 @@ function App() {
                         accept=".pdf"
                         onChange={(e) => {
                           if (e.target.files?.[0]) {
-                            setPdfFile(e.target.files[0]);
-                            setPdfFileName(e.target.files[0].name);
+                            handlePdfUpload(e.target.files[0]);
                           }
                         }}
                       />
@@ -846,8 +1236,7 @@ function App() {
                             accept=".pdf"
                             onChange={(e) => {
                               if (e.target.files?.[0]) {
-                                setPdfFile(e.target.files[0]);
-                                setPdfFileName(e.target.files[0].name);
+                                handlePdfUpload(e.target.files[0]);
                               }
                             }}
                           />
@@ -861,6 +1250,67 @@ function App() {
               {/* Sidebar Tools Panel */}
               <div className="w-96 bg-white border-l border-slate-200 p-6 overflow-auto flex flex-col justify-between flex-shrink-0">
                 <div className="space-y-6">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="font-bold text-slate-800 text-lg mb-1">Document Dashboard</h3>
+                        <p className="text-xs text-slate-400">Open uploaded PDFs from your database.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={loadDocuments}
+                        className="p-2 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
+                        title="Refresh documents"
+                      >
+                        <RefreshCw size={15} />
+                      </button>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-xl overflow-hidden bg-slate-50">
+                      {documentsLoading ? (
+                        <div className="p-4 text-sm text-slate-500">Loading documents...</div>
+                      ) : documents.length > 0 ? (
+                        <div className="max-h-64 overflow-auto divide-y divide-slate-200">
+                          {documents.map((doc) => (
+                            <button
+                              key={doc._id}
+                              type="button"
+                              onClick={() => openDocumentFromDashboard(doc)}
+                              className={`w-full text-left p-3 hover:bg-white transition ${
+                                currentDocumentId === doc._id ? "bg-blue-50" : "bg-slate-50"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-semibold text-slate-800 truncate">
+                                    {doc.originalName}
+                                  </p>
+                                  <p className="text-xs text-slate-400">
+                                    {(doc.fileSize / 1024 / 1024).toFixed(2)} MB •{" "}
+                                    {new Date(doc.createdAt).toLocaleDateString()}
+                                  </p>
+                                </div>
+                                <span
+                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                    doc.status === "Signed"
+                                      ? "bg-emerald-50 text-emerald-700"
+                                      : doc.status === "Rejected"
+                                        ? "bg-red-50 text-red-700"
+                                        : "bg-amber-50 text-amber-700"
+                                  }`}
+                                >
+                                  {doc.status}
+                                </span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="p-4 text-sm text-slate-500">No uploaded documents yet.</div>
+                      )}
+                    </div>
+                  </div>
+
                   <div>
                     <h3 className="font-bold text-slate-800 text-lg mb-1">Signature Controls</h3>
                     <p className="text-xs text-slate-400">Configure parameters for placing on the document.</p>
@@ -1082,6 +1532,31 @@ function App() {
                   >
                     Add Signature Overlay
                   </button>
+
+                  <div className="mt-5 border border-slate-200 rounded-xl overflow-hidden bg-slate-50">
+                    <div className="px-4 py-3 border-b border-slate-200 bg-white flex items-center gap-2">
+                      <Activity size={15} className="text-blue-500" />
+                      <p className="text-sm font-semibold text-slate-700">Audit Trail</p>
+                    </div>
+                    <div className="max-h-48 overflow-auto divide-y divide-slate-200">
+                      {auditLogs.length > 0 ? (
+                        auditLogs.map((log, index) => (
+                          <div key={`${log.action}-${log.createdAt}-${index}`} className="p-3">
+                            <p className="text-xs font-bold text-slate-700">{log.action.replaceAll("_", " ")}</p>
+                            <p className="text-xs text-slate-500 truncate">{log.details || "No details"}</p>
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              {new Date(log.createdAt).toLocaleString()}
+                              {log.user?.name ? ` by ${log.user.name}` : ""}
+                            </p>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="p-3 text-xs text-slate-500">
+                          Upload or open a document to see audit events.
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             </>
@@ -1186,6 +1661,23 @@ function App() {
                   <p className="text-sm text-slate-500">Configure signer lists and monitor signature completion status.</p>
                 </div>
 
+                {lastSignLink && (
+                  <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="text-xs uppercase tracking-wider font-bold text-blue-600">Latest signing link</p>
+                      <p className="text-sm text-blue-900 truncate">{lastSignLink}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard?.writeText(lastSignLink)}
+                      className="px-3 py-2 bg-white border border-blue-100 rounded-lg text-xs font-semibold text-blue-700 hover:bg-blue-50 flex items-center gap-2"
+                    >
+                      <Clipboard size={14} />
+                      Copy
+                    </button>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   {/* Left Block: Add Form */}
                   <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4 h-fit">
@@ -1264,7 +1756,7 @@ function App() {
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {recipients.map((r) => (
-                          <tr key={r.id} className="hover:bg-slate-50/50">
+                          <tr key={r._id} className="hover:bg-slate-50/50">
                             <td className="p-4">
                               <p className="font-semibold text-slate-800">{r.name}</p>
                               <p className="text-xs text-slate-400">{r.email}</p>
@@ -1288,13 +1780,20 @@ function App() {
                             <td className="p-4 text-right">
                               <div className="flex gap-2.5 justify-end">
                                 <button
-                                  onClick={() => handleSendReminder(r.name)}
+                                  onClick={() => handleSendReminder(r._id, r.name)}
                                   className="text-xs text-blue-600 hover:text-blue-700 font-semibold transition"
                                 >
                                   Remind
                                 </button>
                                 <button
-                                  onClick={() => handleDeleteRecipient(r.id)}
+                                  onClick={() => copyRecipientLink(r)}
+                                  className="text-slate-400 hover:text-blue-600 transition"
+                                  title="Copy public signing link"
+                                >
+                                  <Clipboard size={16} />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteRecipient(r._id)}
                                   className="text-slate-400 hover:text-red-600 transition"
                                   title="Delete Signer"
                                 >
@@ -1394,7 +1893,7 @@ function App() {
                   <div className="flex items-start gap-3 p-4 bg-blue-50/40 border border-blue-100 rounded-xl text-xs text-blue-700 leading-normal">
                     <Info size={16} className="text-blue-500 flex-shrink-0 mt-0.5" />
                     <div>
-                      <span className="font-semibold">Local Session Storage Info:</span> Draft configurations, signature drawings, colors, and fonts are automatically cached inside the browser session namespace (`signflow_draft`). Saving changes will commit these configurations as default values.
+                      <span className="font-semibold">Cloud Storage:</span> Draft configurations, signatures, documents, and recipients are saved to MongoDB Atlas via the SignFlow API. Upload a PDF first to enable recipient management.
                     </div>
                   </div>
 
