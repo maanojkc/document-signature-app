@@ -40,9 +40,9 @@ app.use((err, _req, res, _next) => {
 
 const start = async () => {
   await connectDB();
-  app.listen(PORT, () => {
-    console.log(`SignFlow API running on http://localhost:${PORT}`);
-  });
+  app.listen(PORT, "0.0.0.0", () => {
+  console.log(`SignFlow API running on port ${PORT}`);
+});
 };
 
 start().catch((err) => {
